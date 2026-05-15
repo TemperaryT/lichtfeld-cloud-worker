@@ -111,6 +111,43 @@ See `docs/acceptance_test.md` for the full validation checklist.
 
 ---
 
+## Direct on Vast (Phase 1 — no Docker-in-Docker)
+
+Vast.ai instances boot *into* a Docker image — they are already containers. Phase 1 builds
+LichtFeld directly on the CUDA devel instance and runs scripts natively.
+
+**Quick start:**
+
+```bash
+# 1. Rent instance
+cd ~/projects/automation_server && source .env && export VAST_API_KEY
+python3 scripts/vast_burst.py search --profile cloud/vast/profiles/lichtfeld.json
+python3 scripts/vast_burst.py create <OFFER_ID> \
+    --profile cloud/vast/profiles/lichtfeld.json --label lichtfeld-smoke-01
+python3 scripts/vast_burst.py wait <INSTANCE_ID>
+# → {"ssh_host": "...", "ssh_port": ...}
+
+# 2. Run smoke test in tmux on agent LXC (~90 min)
+cd ~/projects/lichtfeld-cloud-worker
+tmux new-session -s lfs_smoke
+bash run/smoke_test_direct.sh <ssh_host> <ssh_port>
+
+# 3. Poll training progress
+bash run/status_direct.sh <ssh_host> <ssh_port>
+# → build=done train=TRAINING  note: strategy=mcmc iter=30000 frames=400
+# → build=done train=DONE      note: ply=final.ply
+
+# 4. Download results
+rsync -avz -e "ssh -p <port>" root@<host>:/workspace/lichtfeld/output/ ./output/
+
+# 5. Destroy instance
+python3 ~/projects/automation_server/scripts/vast_burst.py destroy <INSTANCE_ID> --yes
+```
+
+Full step-by-step runbook with failure paths: `docs/runbook_smoke_test.md`
+
+---
+
 ## Phase 2 hook
 
 `automation_server` gets:
