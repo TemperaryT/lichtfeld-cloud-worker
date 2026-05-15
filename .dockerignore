@@ -1,7 +1,11 @@
 data/
 output/
+STATUS/
+logs/
+run/
 *.log
 .git/
+.gitignore
 docs/
 jobs/
 README.md

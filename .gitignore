@@ -1,0 +1,8 @@
+STATUS/*
+!STATUS/.gitkeep
+logs/*
+!logs/.gitkeep
+output/*
+!output/.gitkeep
+data/*
+!data/.gitkeep

@@ -13,6 +13,6 @@ services:
     volumes:
       - ./data:/data:ro
       - ./output:/output
-    # Override entrypoint for validation runs:
-    #   docker compose run --entrypoint /opt/lichtfeld/scripts/validate_gpu.sh lichtfeld
-    #   docker compose run --entrypoint /opt/lichtfeld/scripts/validate_lfs.sh lichtfeld
+    # Training runs via: bash run/train.sh [frames_dir] [output_dir]
+    # Validation runs via: bash run/validate.sh
+    # Status polling via: bash run/status.sh

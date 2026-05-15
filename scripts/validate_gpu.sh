@@ -1,24 +1,11 @@
 #!/usr/bin/env bash
+# GPU validation — called by run/validate.sh, output goes to logs/validate.log.
 set -euo pipefail
 
-echo "=== nvidia-smi ==="
-nvidia-smi
+GPU=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -1)
+[[ -z "$GPU" ]] && { echo "nvidia-smi failed"; exit 1; }
 
-echo ""
-echo "=== GPU model + VRAM ==="
-nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+python3 -c "import ctypes; ctypes.cdll.LoadLibrary('libcuda.so.1')" 2>/dev/null \
+    || { echo "libcuda.so.1 not found"; exit 1; }
 
-echo ""
-echo "=== CUDA runtime ==="
-python3 -c "
-import ctypes, sys
-try:
-    ctypes.cdll.LoadLibrary('libcuda.so.1')
-    print('libcuda.so.1: OK')
-except OSError as e:
-    print(f'libcuda.so.1: FAILED — {e}')
-    sys.exit(1)
-"
-
-echo ""
-echo "validate_gpu: PASS"
+echo "GPU=$GPU"

@@ -1,30 +1,18 @@
 #!/usr/bin/env bash
+# LFS binary validation — called by run/validate.sh, output goes to logs/validate.log.
 set -euo pipefail
 
-echo "=== binary path ==="
-which lichtfeld-studio
-ls -lh "$(which lichtfeld-studio)"
+# Print version to confirm Linux build matches Windows v0.5.2 baseline
+VERSION=$(lichtfeld-studio --version 2>&1 || lichtfeld-studio --help 2>&1 | head -1)
+echo "LFS=$VERSION"
 
-echo ""
-echo "=== version / help ==="
-lichtfeld-studio --version 2>&1 || lichtfeld-studio --help 2>&1 | head -30
-
-echo ""
-echo "=== confirm expected headless flags ==="
-# Windows v0.5.2 confirmed: --headless --train --no-interop --data-path --output-path --log-file
-# If any are missing, document here and update run_train.sh accordingly.
+# Confirm expected headless flags — if any missing, note for run_train.sh update
 HELP=$(lichtfeld-studio --help 2>&1 || true)
+MISSING=""
 for flag in --headless --train --no-interop --data-path --output-path --log-file; do
-    if echo "$HELP" | grep -q "$flag"; then
-        echo "  $flag: FOUND"
-    else
-        echo "  $flag: NOT FOUND (validate_lfs: needs investigation)"
-    fi
+    echo "$HELP" | grep -q "$flag" || MISSING="$MISSING $flag"
 done
+[[ -n "$MISSING" ]] && echo "flags_missing=$MISSING"
 
-echo ""
-echo "=== shared lib check ==="
-ldd "$(which lichtfeld-studio)" 2>&1 | grep -E "not found" && echo "MISSING LIBS ABOVE" || echo "all libs resolved"
-
-echo ""
-echo "validate_lfs: PASS"
+# Shared lib check — missing libs surface here before a real run
+ldd "$(which lichtfeld-studio)" 2>&1 | grep "not found" && { echo "missing_libs=see above"; exit 1; } || true

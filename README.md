@@ -1,131 +1,120 @@
 # lichtfeld-cloud-worker
 
-Containerized LichtFeld Studio for headless Gaussian Splatting on rented GPU compute
-(Vast.ai). Trains on a prepped frames directory, produces a PLY artifact and exportable
-HTML viewer.
+Containerized LichtFeld Studio for headless Gaussian Splatting on rented GPU compute.
+Agent-driven: scripts run detached, agent polls `status.sh`, reads logs only on failure.
 
-**Phase 1:** standalone container — build, validate, run manually.
-**Phase 2:** wired into `automation_server` as a `cloud_burst_lfs` queue job (see `jobs/example.yaml`).
-
----
-
-## Requirements
-
-- Docker with NVIDIA Container Toolkit
-- NVIDIA GPU, CUDA 12.8+, RTX 20/30/40 series (SM 75+)
-- Prepped frames directory (COLMAP-ready images, min ~40 frames)
+**Phase 1:** standalone container — build, validate, run.
+**Phase 2:** `cloud_burst_lfs` job type in `automation_server` (see `jobs/example.yaml`).
 
 ---
 
-## Quick start
+## Script layers
 
-```bash
-# Build (15–30 min first time — C++23 + CUDA from source)
-docker build -t lichtfeld-cloud-worker .
+```
+run/          ← host-side; what the agent calls
+  build.sh      start docker build (background)
+  validate.sh   GPU + LFS binary checks
+  train.sh      start training run (detached container)
+  status.sh     poll all state in one call
+  export.sh     convert PLY → HTML viewer
+  serve.sh      start viewer HTTP server (detached)
+  logs.sh       tail a named log on-demand
+  teardown.sh   stop containers; --wipe resets all state
 
-# Validate GPU
-docker run --gpus all --rm \
-  --entrypoint /opt/lichtfeld/scripts/validate_gpu.sh \
-  lichtfeld-cloud-worker
-
-# Validate LichtFeld binary
-docker run --gpus all --rm \
-  --entrypoint /opt/lichtfeld/scripts/validate_lfs.sh \
-  lichtfeld-cloud-worker
-
-# Train
-docker run --gpus all --rm \
-  -v /path/to/frames:/data:ro \
-  -v /path/to/output:/output \
-  -e LFS_DATA_PATH=/data \
-  -e LFS_OUTPUT_PATH=/output \
-  lichtfeld-cloud-worker
+scripts/      ← container-internal; copied into image by Dockerfile
+  run_train.sh    training entrypoint; writes STATUS.md
+  validate_gpu.sh GPU check
+  validate_lfs.sh LFS binary + flag check
+  export_viewer.sh PLY → HTML
+  serve_viewer.sh HTTP server
 ```
 
 ---
 
-## Environment variables
+## Agent workflow
+
+```bash
+# 1. Build (background, ~15-30 min first time)
+bash run/build.sh
+
+# 2. Poll until done
+bash run/status.sh
+# → build=building validate=pending train=pending export=pending
+
+# 3. Validate
+bash run/validate.sh
+bash run/status.sh
+# → build=done validate=done train=pending export=pending
+# → note: GPU=NVIDIA GeForce RTX 4090, 24564 MiB LFS=v0.5.2
+
+# 4. Train (detached, 30k iter ~20-60 min depending on GPU)
+bash run/train.sh /path/to/frames /path/to/output
+bash run/status.sh  # poll every 60s
+# → build=done validate=done train=TRAINING export=pending
+# → note: strategy=mcmc iter=30000 frames=40
+# → build=done validate=done train=DONE export=pending
+# → note: ply=final.ply
+
+# 5. Export viewer
+bash run/export.sh /path/to/output
+bash run/status.sh
+# → build=done validate=done train=DONE export=done
+# → note: viewer=/path/to/output/viewer/scene.html
+
+# 6. Serve (detached)
+bash run/serve.sh /path/to/output 8080
+# → serve=started tunnel: ssh -L 8080:localhost:8080 ...
+
+# On failure — read logs
+bash run/logs.sh train    # last 50 lines of train.log
+bash run/logs.sh build    # last 50 lines of build.log
+
+# Reset for re-run
+bash run/teardown.sh --wipe
+```
+
+---
+
+## Environment variables (for train.sh)
 
 | Variable | Default | Description |
 |---|---|---|
-| `LFS_DATA_PATH` | (required) | Path to prepped frames directory inside container |
-| `LFS_OUTPUT_PATH` | `/output` | Output directory inside container |
+| `LFS_IMAGE` | `lichtfeld-cloud-worker:latest` | Docker image tag |
 | `LFS_STRATEGY` | `mcmc` | Training strategy: `mcmc`, `adc`, `igs+` |
 | `LFS_ITER` | `30000` | Training iterations |
-| `LFS_MAX_WIDTH` | `2560` | Max image width (images scaled down if wider) |
+| `LFS_MAX_WIDTH` | `2560` | Max image width |
 
 ---
 
-## Viewer workflow
+## STATUS.md states
 
-After training completes, export and serve the HTML viewer:
-
-```bash
-# Export PLY → HTML viewer
-PLY=$(find /path/to/output -name "*.ply" | tail -1)
-docker run --rm \
-  -v /path/to/output:/output \
-  --entrypoint /opt/lichtfeld/scripts/export_viewer.sh \
-  lichtfeld-cloud-worker "$PLY" /output/viewer
-
-# Serve viewer
-docker run --rm \
-  -v /path/to/output/viewer:/viewer \
-  -p 8080:8080 \
-  --entrypoint /opt/lichtfeld/scripts/serve_viewer.sh \
-  lichtfeld-cloud-worker /viewer
-
-# SSH tunnel from local machine
-ssh -L 8080:localhost:8080 <user>@<instance-ip>
-# Open http://localhost:8080/scene.html
-```
-
----
-
-## STATUS.md state machine
-
-`run_train.sh` writes `/output/STATUS.md` at each stage. Phase 2 automation handler polls
-this file via SSH (same pattern as `nerfstudio_frames_runner.sh` in `cloud_burst_3dgs`).
+`run_train.sh` inside the container writes `/output/STATUS.md`:
 
 ```
-STATE=TRAINING   → training in progress
-STATE=DONE       → PLY artifact ready (NOTE contains ply=<path>)
-STATE=FAILED     → error (NOTE contains reason)
+TRAINING → DONE
+       └→ FAILED
 ```
 
----
-
-## Image registry (after first successful build)
-
-```bash
-docker tag lichtfeld-cloud-worker ghcr.io/<github-username>/lichtfeld-cloud-worker:latest
-docker push ghcr.io/<github-username>/lichtfeld-cloud-worker:latest
-```
-
-Subsequent Vast instances pull the pre-built image instead of rebuilding (~2 min vs 30 min).
+`run/status.sh` reads this plus `STATUS/BUILD`, `STATUS/VALIDATE`, `STATUS/EXPORT`
+and prints one compact line.
 
 ---
 
-## Validation
+## Known unknowns (resolve during acceptance testing)
 
-See `docs/acceptance_test.md` for the full 9-step validation checklist.
-
----
-
-## Known unknowns (resolve during first build)
-
-- `--strategy` / `--iter` / `--max-width` flag names confirmed on Windows v0.5.2;
-  validate against `lichtfeld-studio --help` in the Linux container
-- Exact PLY artifact path after training (discovered dynamically by `run_train.sh`)
+- `--strategy` / `--iter` / `--max-width` flag names validated on Windows v0.5.2;
+  verify against `lichtfeld-studio --help` in the Linux container
+- Exact PLY artifact path (discovered dynamically)
 - Whether vcpkg runtime libs need additional `COPY` in Dockerfile stage 2
-  (check: `docker run --entrypoint ldd lichtfeld-cloud-worker /usr/local/bin/lichtfeld-studio`)
+
+See `docs/acceptance_test.md` for the full validation checklist.
 
 ---
 
-## Phase 2 integration
+## Phase 2 hook
 
-When this container is proven, `automation_server` gets:
-- `cloud/vast/profiles/lichtfeld.json` — Vast instance profile pointing to this image
-- `worker/handlers/cloud_burst_lfs.py` — mirrors `cloud_burst_3dgs.py`; polls STATUS.md
+`automation_server` gets:
+- `cloud/vast/profiles/lichtfeld.json` — Vast profile with this image
+- `worker/handlers/cloud_burst_lfs.py` — polls STATUS.md via SSH, same as `cloud_burst_3dgs`
 - Dispatch entry in `worker/worker.py`
 - `cloud_burst_lfs` section in `docs/pipelines.md`
