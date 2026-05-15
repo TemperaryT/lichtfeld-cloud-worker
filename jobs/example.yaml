@@ -1,0 +1,14 @@
+# Example Phase 2 job spec for automation_server cloud_burst_lfs handler.
+# This documents the intended submit payload — not consumed by anything yet.
+# See automation_server/docs/pipelines.md once cloud_burst_lfs is wired.
+
+task_type: cloud_burst_lfs
+domain: reality_capture
+project_slug: bird-statue-v1
+parameters:
+  frames_dir: /mnt/automation_data/jobs/reality_capture/<slug>-<id>/outputs/frames
+  label: frames
+  strategy: mcmc
+  iterations: 30000
+  max_width: 2560
+  profile_path: /opt/automation_server/cloud/vast/profiles/lichtfeld.json

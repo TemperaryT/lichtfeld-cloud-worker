@@ -1,0 +1,9 @@
+# LichtFeld Studio default training config
+# Reference documentation only — actual invocation uses CLI flags in run_train.sh.
+# If --config is confirmed to work headlessly (validate in acceptance_test.md step 4),
+# this file can be passed as: lichtfeld-studio --config /opt/lichtfeld/configs/default_train.yaml
+
+strategy: mcmc
+iterations: 30000
+max_width: 2560
+eval: false

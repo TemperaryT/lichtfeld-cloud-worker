@@ -1,0 +1,18 @@
+services:
+  lichtfeld:
+    build: .
+    image: lichtfeld-cloud-worker
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - LFS_DATA_PATH=/data
+      - LFS_OUTPUT_PATH=/output
+      - LFS_STRATEGY=${LFS_STRATEGY:-mcmc}
+      - LFS_ITER=${LFS_ITER:-30000}
+      - LFS_MAX_WIDTH=${LFS_MAX_WIDTH:-2560}
+    volumes:
+      - ./data:/data:ro
+      - ./output:/output
+    # Override entrypoint for validation runs:
+    #   docker compose run --entrypoint /opt/lichtfeld/scripts/validate_gpu.sh lichtfeld
+    #   docker compose run --entrypoint /opt/lichtfeld/scripts/validate_lfs.sh lichtfeld
