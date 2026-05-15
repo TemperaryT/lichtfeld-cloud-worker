@@ -22,7 +22,8 @@ CID=$(docker run -d --gpus all \
     -e LFS_OUTPUT_PATH=/output \
     -e LFS_STRATEGY="${LFS_STRATEGY:-mcmc}" \
     -e LFS_ITER="${LFS_ITER:-30000}" \
-    -e LFS_MAX_WIDTH="${LFS_MAX_WIDTH:-2560}" \
+    -e LFS_MAX_WIDTH="${LFS_MAX_WIDTH:-1920}" \
+    -e LFS_MAX_CAP="${LFS_MAX_CAP:-}" \
     "$TAG")
 
 echo "$CID" > "$REPO_ROOT/STATUS/CONTAINER_ID"

@@ -7,7 +7,8 @@ LFS_DATA_PATH="${LFS_DATA_PATH:-}"
 LFS_OUTPUT_PATH="${LFS_OUTPUT_PATH:-/output}"
 LFS_STRATEGY="${LFS_STRATEGY:-mcmc}"
 LFS_ITER="${LFS_ITER:-30000}"
-LFS_MAX_WIDTH="${LFS_MAX_WIDTH:-2560}"
+LFS_MAX_WIDTH="${LFS_MAX_WIDTH:-1920}"
+LFS_MAX_CAP="${LFS_MAX_CAP:-}"
 STATUS_FILE="$LFS_OUTPUT_PATH/STATUS.md"
 LOG_FILE="$LFS_OUTPUT_PATH/train.log"
 
@@ -26,20 +27,22 @@ frame_count=$(find "$LFS_DATA_PATH" -maxdepth 1 -type f \( -name "*.jpg" -o -nam
 [[ "$frame_count" -eq 0 ]] && die "no image files in $LFS_DATA_PATH"
 
 mkdir -p "$LFS_OUTPUT_PATH"
-write_status "TRAINING" "strategy=$LFS_STRATEGY iter=$LFS_ITER frames=$frame_count"
+write_status "TRAINING" "strategy=$LFS_STRATEGY iter=$LFS_ITER frames=$frame_count max_cap=${LFS_MAX_CAP:-default}"
+
+# Build command — --max-cap only passed when explicitly set
+CMD=(lichtfeld-studio
+    --headless --train --no-interop
+    --data-path "$LFS_DATA_PATH"
+    --output-path "$LFS_OUTPUT_PATH"
+    --strategy "$LFS_STRATEGY"
+    --iter "$LFS_ITER"
+    --max-width "$LFS_MAX_WIDTH"
+    --log-file "$LOG_FILE"
+)
+[[ -n "$LFS_MAX_CAP" ]] && CMD+=(--max-cap "$LFS_MAX_CAP")
 
 # All output to log file only — no tee, no stdout noise
-lichtfeld-studio \
-    --headless \
-    --train \
-    --no-interop \
-    --data-path "$LFS_DATA_PATH" \
-    --output-path "$LFS_OUTPUT_PATH" \
-    --strategy "$LFS_STRATEGY" \
-    --iter "$LFS_ITER" \
-    --max-width "$LFS_MAX_WIDTH" \
-    --log-file "$LOG_FILE" \
-    >> "$LOG_FILE" 2>&1
+"${CMD[@]}" >> "$LOG_FILE" 2>&1
 
 PLY=$(find "$LFS_OUTPUT_PATH" -name "*.ply" -not -path "*/\.*" | sort | tail -1)
 [[ -z "$PLY" ]] && die "no PLY artifact found — check logs/train"
