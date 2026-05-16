@@ -4,9 +4,12 @@ FROM nvidia/cuda:12.8.0-devel-ubuntu24.04 AS builder
 ARG LFS_TAG=v0.5.2
 ARG MAKE_JOBS=2
 
+# Note: Ubuntu 24.04's apt cmake is 3.28, but LichtFeld needs >=3.30.
+# Install cmake via pip (pulls 3.31+). bootstrap_instance.sh does the same.
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-    gcc-14 g++-14 cmake ninja-build git python3 curl zip unzip pkg-config \
+    gcc-14 g++-14 ninja-build git python3 python3-pip curl zip unzip pkg-config \
     libssl-dev ca-certificates \
+    && pip3 install --no-cache-dir --break-system-packages -q cmake \
     && rm -rf /var/lib/apt/lists/* \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 14 \
     && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 14
