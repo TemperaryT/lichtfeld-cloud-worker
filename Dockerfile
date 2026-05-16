@@ -6,9 +6,14 @@ ARG MAKE_JOBS=2
 
 # Note: Ubuntu 24.04's apt cmake is 3.28, but LichtFeld needs >=3.30.
 # Install cmake via pip (pulls 3.31+). bootstrap_instance.sh does the same.
+#
+# vcpkg ports often require additional build tools (nasm for x264, autotools
+# for many C libs, bison/flex for parsers). Pre-installing avoids piecemeal
+# retry cycles when transitive deps fail.
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
     gcc-14 g++-14 ninja-build git python3 python3-pip curl zip unzip pkg-config \
     libssl-dev ca-certificates \
+    nasm autoconf automake libtool bison flex gettext \
     && pip3 install --no-cache-dir --break-system-packages -q cmake \
     && rm -rf /var/lib/apt/lists/* \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 14 \
