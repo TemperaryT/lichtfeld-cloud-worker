@@ -1,10 +1,22 @@
 # lichtfeld-cloud-worker
 
 Containerized LichtFeld Studio for headless Gaussian Splatting on rented GPU compute.
-Agent-driven: scripts run detached, agent polls `status.sh`, reads logs only on failure.
+Agent-driven: scripts run detached, agent polls `status_direct.sh`, reads logs only on failure.
 
-**Phase 1:** standalone container — build, validate, run.
-**Phase 2:** `cloud_burst_lfs` job type in `automation_server` (see `jobs/example.yaml`).
+**Image:** `ghcr.io/temperaryt/lichtfeld-cloud-worker:v0.5.2`
+(built + pushed by GHA, see `.github/workflows/build-and-push.yml`)
+
+Vast.ai instances boot AS this image (`ssh_direct` runtype) — no Docker-in-Docker,
+LichtFeld + ffmpeg + python deps preinstalled. To rebuild and republish:
+
+```bash
+bash run/build_and_push.sh v0.5.2
+```
+
+**Smoke test runbook:** `docs/runbook_smoke_test.md`
+
+**Phase 1:** pre-built image on Vast, manual rent/run loop (current).
+**Phase 2:** `cloud_burst_lfs` job type in `automation_server` (same image, automated).
 
 ---
 

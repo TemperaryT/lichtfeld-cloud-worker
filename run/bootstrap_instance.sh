@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# FALLBACK ONLY — preferred path is the pre-built GHCR image
+# (ghcr.io/temperaryt/lichtfeld-cloud-worker:v0.5.2). Use this script only when:
+#   - You need to test a LichtFeld release branch not yet tagged in the image
+#   - The GHA build is broken and you need a one-off instance
+#   - You're debugging build flags interactively
+#
 # Build LichtFeld Studio from source on a Vast.ai CUDA devel instance.
 # Target image: nvidia/cuda:12.8.0-devel-ubuntu24.04
 # Idempotent — skips build if lichtfeld-studio is already in PATH.

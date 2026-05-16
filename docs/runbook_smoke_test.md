@@ -1,31 +1,48 @@
-# Runbook: LichtFeld Smoke Test (Direct on Vast)
+# Runbook: LichtFeld Smoke Test (Pre-built Image on Vast)
 
-**Status:** Ready to execute. All scripts built. No instance rented yet.
+**Status:** Ready to execute once the GHCR image is published and public.
 
-This runs the full pipeline on a rented Vast.ai GPU — bypasses worker-01/Gungnir entirely.
+The image is pulled by Vast as the instance image — no Docker-in-Docker, no per-rental
+build. Bypasses worker-01/Gungnir entirely.
 
 ```
-robot_arm.mp4 (Mjolnir NFS)
-  → transfer to Vast instance
+ghcr.io/temperaryt/lichtfeld-cloud-worker:v0.5.2
+  → Vast instance boots AS this image (LichtFeld + ffmpeg + python deps preinstalled)
+  → SCP video from Mjolnir (via agent LXC relay)
   → ffmpeg: extract ~400-600 raw frames
   → prep_frames.py: blur filter → 400 sharp frames
   → LichtFeld MCMC 30k iter → PLY
-  → download output
+  → monitor.sh polls until DONE
+  → rsync output back to laptop
 ```
 
-Total time: ~90 min (30 min build + 5 min frames + 30-60 min training)
+Total time: ~30–40 min per run (image pull 5–10 min + frame prep 5 min + training 30–60 min).
 
 ---
 
-## Prerequisites
+## One-time setup — publish image to GHCR
 
-- `VAST_API_KEY` in `~/projects/automation_server/.env` — confirmed set
-- Video at `/mnt/automation_data/inbox/robot_arm.mp4` on Mjolnir NFS — confirmed
-- Scripts at `~/projects/lichtfeld-cloud-worker/` — committed
+**Skip if already done** (image visible at https://github.com/TemperaryT?tab=packages).
+
+```bash
+cd ~/projects/lichtfeld-cloud-worker
+bash run/build_and_push.sh v0.5.2
+# Triggers GHA workflow, watches it to completion (~60-90 min first time).
+
+# Once succeeded, make the package public ONCE:
+gh api -X PATCH /user/packages/container/lichtfeld-cloud-worker/visibility \
+    -f visibility=public
+
+# Verify:
+gh api /users/temperaryt/packages/container/lichtfeld-cloud-worker | jq .visibility
+# → "public"
+```
 
 ---
 
-## Step 1 — Search and rent instance
+## Per-run workflow
+
+### Step 1 — rent instance
 
 ```bash
 cd ~/projects/automation_server
@@ -34,15 +51,13 @@ source .env && export VAST_API_KEY
 python3 scripts/vast_burst.py search --profile cloud/vast/profiles/lichtfeld.json
 ```
 
-Pick the cheapest offer. Profile requires: 16GB+ VRAM, CUDA 12.0+, ≤$0.75/hr, 80GB disk.
-Image: `nvidia/cuda:12.8.0-devel-ubuntu24.04`
+Profile requires: 16 GB+ VRAM, CUDA 12.0+, ≤$0.75/hr, 60 GB disk, RTX 30/40 series.
 
 ```bash
 OFFER_ID=<id from search>
 python3 scripts/vast_burst.py create "$OFFER_ID" \
     --profile cloud/vast/profiles/lichtfeld.json \
     --label lichtfeld-smoke-01
-# → prints instance_id
 
 INSTANCE_ID=<instance_id from output>
 python3 scripts/vast_burst.py wait "$INSTANCE_ID"
@@ -52,73 +67,48 @@ SSH_HOST=<ssh_host>
 SSH_PORT=<ssh_port>
 ```
 
----
-
-## Step 2 — Run smoke test in tmux
+### Step 2 — run smoke test in tmux
 
 ```bash
 tmux new-session -s lfs_smoke
 
 cd ~/projects/lichtfeld-cloud-worker
-bash run/smoke_test_direct.sh $SSH_HOST $SSH_PORT
+bash run/smoke_test_direct.sh "$SSH_HOST" "$SSH_PORT"
 ```
 
-The script runs sequentially through 6 stages with progress logs. Polling is built in.
-You can detach (`Ctrl-B D`) and reattach (`tmux attach -t lfs_smoke`) at any point.
+Stages 1–5 run foreground (~5 min total: pre-flight, video transfer, frame extract+prep,
+launch training). Training is launched detached in tmux on the instance — the script
+exits with poll/download/destroy commands printed.
 
----
-
-## Step 3 — Monitor training (after script exits)
-
-`smoke_test_direct.sh` exits after launching training. Poll manually:
+### Step 3 — start monitor in its own tmux session
 
 ```bash
-bash run/status_direct.sh $SSH_HOST $SSH_PORT
-# build=done train=TRAINING  note: strategy=mcmc iter=30000 frames=400
-# ... wait 30-60 min ...
-# build=done train=DONE      note: ply=final.ply
+tmux new-session -d -s lfs_monitor -- bash run/monitor.sh "$SSH_HOST" "$SSH_PORT"
+
+# Read the timeline any time (zero token cost — just file reads):
+tail -f logs/monitor-${SSH_HOST}.log
 ```
 
-To tail live training output:
-```bash
-ssh -p $SSH_PORT root@$SSH_HOST 'tail -f /workspace/lichtfeld/output/train.log'
-```
+`monitor.sh` polls every 60 s, logs state transitions only, and exits when
+training reaches DONE or FAILED. Detach freely.
 
----
-
-## Step 4 — Download results
+### Step 4 — download results
 
 ```bash
 mkdir -p ~/results/robot-arm-v1
 rsync -avz -e "ssh -p $SSH_PORT" \
-    root@$SSH_HOST:/workspace/lichtfeld/output/ \
+    "root@${SSH_HOST}:/workspace/lichtfeld/output/" \
     ~/results/robot-arm-v1/
 # Expect: *.ply, train.log, STATUS.md
 ```
 
-Record the PLY size and training time in LOG.md. These calibrate future runs.
-
----
-
-## Step 5 — Export viewer (optional)
-
-```bash
-bash run/export.sh ~/results/robot-arm-v1
-# → ~/results/robot-arm-v1/viewer/scene.html
-
-bash run/serve.sh ~/results/robot-arm-v1 8080
-# → tunnel: ssh -L 8080:localhost:8080 op@192.168.4.61
-```
-
----
-
-## Step 6 — Destroy instance
+### Step 5 — destroy instance
 
 ```bash
 python3 ~/projects/automation_server/scripts/vast_burst.py destroy "$INSTANCE_ID" --yes
 ```
 
-Do not leave the instance running after the smoke test — GPU time is billed per hour.
+Do not leave the instance running — GPU is billed per hour.
 
 ---
 
@@ -126,43 +116,53 @@ Do not leave the instance running after the smoke test — GPU time is billed pe
 
 | Symptom | Check |
 |---|---|
-| Build stuck at `installing_deps` or `cloning` | `ssh -p $SSH_PORT root@$SSH_HOST 'tail -30 /workspace/lichtfeld/logs/build.log'` |
-| Training `FAILED` with flag error | `ssh -p $SSH_PORT root@$SSH_HOST 'lichtfeld-studio --help'` — compare flags |
-| `--max-cap` not recognized | Remove `LFS_MAX_CAP=3000000` from the re-run command |
-| `--train` not recognized | Remove `--train` from `scripts/run_train.sh` and re-push |
-| No PLY after training | Check `train.log`; may need `--train` flag OR different output path |
-| Frame count zero | Check `logs/prep.log`; lower `--threshold` (try 50) |
+| `lichtfeld-studio: missing` in stage 1 | Instance not using pre-built image; check `lichtfeld.json` profile and `Step 1` outputs |
+| `GPU not visible` in stage 1 | Wrong instance image / image incompatible with GPU |
+| Training `FAILED` with flag error | `ssh -p $SSH_PORT root@$SSH_HOST 'lichtfeld-studio --help'` and compare to `scripts/run_train.sh` |
+| `--max-cap` unrecognized | Remove `LFS_MAX_CAP=3000000` env var |
+| `--train` unrecognized | Remove `--train` from `scripts/run_train.sh` and re-tag/re-build image |
+| Frame count zero | Check `/workspace/lichtfeld/logs/prep.log` on instance; lower `--threshold` (e.g. 50) |
 
-### Re-run training only (after flags fixed)
+### Re-run training only after fixing flags
 
 ```bash
-ssh -p $SSH_PORT root@$SSH_HOST "tmux new-session -d -s lfs_retrain \
+ssh -p $SSH_PORT root@$SSH_HOST "tmux kill-session -t lfs_train 2>/dev/null; tmux new-session -d -s lfs_train \
   'env LFS_DATA_PATH=/workspace/lichtfeld/prepped/frames \
        LFS_OUTPUT_PATH=/workspace/lichtfeld/output \
        LFS_STRATEGY=mcmc LFS_ITER=30000 LFS_MAX_WIDTH=1920 LFS_MAX_CAP=3000000 \
-   bash /workspace/lichtfeld/scripts/run_train.sh'"
-bash run/status_direct.sh $SSH_HOST $SSH_PORT
+   bash /opt/lichtfeld/scripts/run_train.sh'"
+bash run/monitor.sh "$SSH_HOST" "$SSH_PORT"
 ```
 
 ---
 
-## Known unknowns (discover during this run)
+## Known unknowns (validate during the first run)
 
-1. Does `--train` flag exist in v0.5.2 Linux build? (`--help` will show it)
+1. Does `--train` flag exist in v0.5.2 Linux build? (`lichtfeld-studio --help` confirms)
 2. Does `--max-cap` exist? (remove if not)
 3. Exact PLY output path — script uses `find *.ply` dynamically
-4. Build time on actual Vast hardware — may vary 15-60 min
-5. Does headless build flag suppress all GUI deps cleanly? — build log will show
+4. GHA build time for first publication — expect 60–90 min
 
-Document actual findings in LOG.md after the run.
+Record actuals in LOG.md after first successful run.
 
 ---
 
-## After the smoke test
+## Fallback path (build-from-source on Vast)
 
-1. Record in LOG.md: build time, training time, PLY file size, GPU model, cost
-2. Update `scripts/run_train.sh` if any flags need correction
-3. Open Phase 2: `cloud_burst_lfs` handler in automation_server
-   - Mirror `cloud_burst_3dgs.py` pattern
-   - Polls STATUS.md via SSH (same contract as this runbook)
-   - Dispatch entry in `worker/worker.py`
+If GHCR is broken or you need to test an unreleased LichtFeld branch:
+
+1. Search/rent with a **different** profile pointing at `nvidia/cuda:12.8.0-devel-ubuntu24.04`
+2. SCP `run/bootstrap_instance.sh` to instance
+3. Run it — builds LichtFeld in tmux (~30 min on GPU instance)
+4. Proceed with `smoke_test_direct.sh` (pre-flight check will succeed once the binary is present)
+
+This path is documented for emergencies — the pre-built image is the primary route.
+
+---
+
+## Phase 2 hook (when Gungnir is back)
+
+The same GHCR image becomes the contract for `cloud_burst_lfs` handler in automation_server.
+The handler mirrors `worker/handlers/cloud_burst_3dgs.py`: claims a job from Redis, calls
+`vc.create_instance` with `cloud/vast/profiles/lichtfeld.json`, polls STATUS.md via SSH,
+uploads PLY to B2, destroys instance.

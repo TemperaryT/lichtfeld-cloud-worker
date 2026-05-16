@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # End-to-end LichtFeld smoke test on a rented Vast.ai instance.
-# Runs directly on the CUDA devel image — no Docker-in-Docker.
-# Run inside a tmux session on agent LXC (~90 min total).
+# Assumes the instance was created with a pre-built lichtfeld-cloud-worker image
+# (e.g. ghcr.io/temperaryt/lichtfeld-cloud-worker:v0.5.2). LichtFeld, ffmpeg,
+# and prep_frames.py deps are already installed.
+#
+# Run inside a tmux session on agent LXC. Stages 1–5 are foreground (~5 min).
+# Training is launched detached on the instance (~30–60 min) — poll separately
+# via run/monitor.sh.
 #
 # Usage: bash run/smoke_test_direct.sh <ssh_host> <ssh_port>
 #
@@ -30,88 +35,52 @@ PREP_TARGET="${PREP_TARGET:-400}"
 PREP_THRESHOLD="${PREP_THRESHOLD:-80}"
 
 WORKSPACE="/workspace/lichtfeld"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AUTOMATION_ROOT="${AUTOMATION_ROOT:-$HOME/projects/automation_server}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 _ssh() { ssh -p "$VAST_PORT" -o StrictHostKeyChecking=no -o BatchMode=yes "root@$VAST_HOST" "$@"; }
 log()  { echo "[$(date -u +%H:%M:%S)] $*"; }
 die()  { log "FAILED: $*"; exit 1; }
 
-poll_build() {
-    local deadline=$(( $(date +%s) + 2700 ))  # 45 min max
-    while [[ $(date +%s) -lt $deadline ]]; do
-        local state note
-        state=$(_ssh "grep '^STATE=' $WORKSPACE/STATUS/BUILD 2>/dev/null | cut -d= -f2-" || echo "pending")
-        note=$(_ssh  "grep '^NOTE='  $WORKSPACE/STATUS/BUILD 2>/dev/null | cut -d= -f2-" || echo "")
-        log "build: $state ${note:+($note)}"
-        [[ "$state" == "done"   ]] && return 0
-        [[ "$state" == "failed" ]] && die "build failed — run: ssh -p $VAST_PORT root@$VAST_HOST 'cat $WORKSPACE/logs/build.log'"
-        sleep 60
-    done
-    die "build timed out after 45 min"
-}
-
 log "=== LichtFeld smoke test: $VAST_HOST:$VAST_PORT ==="
 log "config: strategy=$LFS_STRATEGY iter=$LFS_ITER max_width=$LFS_MAX_WIDTH max_cap=$LFS_MAX_CAP"
 log "frames: target=$PREP_TARGET threshold=$PREP_THRESHOLD"
 
-# ── 1/6: GPU check ────────────────────────────────────────────────────────────
-log "--- 1/6: GPU check"
+# ── 1/5: pre-flight (GPU + LichtFeld + deps already in image) ─────────────────
+log "--- 1/5: pre-flight (GPU + pre-built image checks)"
 _ssh "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader" \
-    || die "GPU not visible — check instance image (requires nvidia/cuda:12.8.0-devel-ubuntu24.04)"
+    || die "GPU not visible — wrong instance image?"
+LFS_VERSION=$( _ssh "lichtfeld-studio --version 2>&1 | head -1 || echo missing" )
+[[ "$LFS_VERSION" == "missing" ]] && die "lichtfeld-studio binary not found — instance not using pre-built image"
+log "lichtfeld-studio: $LFS_VERSION"
+_ssh "which ffmpeg >/dev/null && python3 -c 'import cv2, PIL, numpy' 2>/dev/null" \
+    || die "ffmpeg / python deps missing — wrong image tag?"
+log "ffmpeg + cv2/PIL/numpy: ok"
 
-# ── 2/6: Deploy scripts ───────────────────────────────────────────────────────
-log "--- 2/6: deploying scripts to $WORKSPACE"
-_ssh "mkdir -p $WORKSPACE/run $WORKSPACE/scripts $WORKSPACE/STATUS $WORKSPACE/logs $WORKSPACE/output"
-
-tar -C "$REPO_ROOT" -cf - \
-    run/bootstrap_instance.sh \
-    scripts/run_train.sh \
-    scripts/validate_gpu.sh \
-    scripts/validate_lfs.sh \
-    | _ssh "tar -C $WORKSPACE -xf -"
-
-scp -P "$VAST_PORT" -o StrictHostKeyChecking=no \
+# ── 2/5: workspace + prep_frames.py ───────────────────────────────────────────
+log "--- 2/5: prepare workspace; deploy prep_frames.py"
+_ssh "mkdir -p $WORKSPACE/output $WORKSPACE/frames_raw $WORKSPACE/prepped $WORKSPACE/logs"
+scp -P "$VAST_PORT" -o StrictHostKeyChecking=no -q \
     "$AUTOMATION_ROOT/scripts/prep_frames.py" \
     "root@$VAST_HOST:$WORKSPACE/prep_frames.py"
+log "prep_frames.py: deployed"
 
-_ssh "chmod +x $WORKSPACE/run/bootstrap_instance.sh $WORKSPACE/scripts/run_train.sh"
-
-# Install prep_frames deps now (runs in background while video transfers)
-_ssh "pip3 install opencv-python-headless pillow numpy -q \
-    > $WORKSPACE/logs/pip.log 2>&1 &"
-log "scripts deployed; pip install running in background"
-
-# ── 3/6: Transfer video ───────────────────────────────────────────────────────
-log "--- 3/6: transferring video via $VIDEO_RELAY relay"
+# ── 3/5: transfer video via Mjolnir relay ─────────────────────────────────────
+log "--- 3/5: transferring video via $VIDEO_RELAY relay"
 log "source: $VIDEO_RELAY:$VIDEO_SOURCE"
 ssh "$VIDEO_RELAY" "cat \"$VIDEO_SOURCE\"" \
     | _ssh "cat > $WORKSPACE/robot_arm.mp4"
 VIDEO_SIZE=$( _ssh "du -sh $WORKSPACE/robot_arm.mp4" | cut -f1 )
 log "video: $WORKSPACE/robot_arm.mp4  ($VIDEO_SIZE)"
 
-# ── 4/6: Build LichtFeld in tmux (poll until done) ────────────────────────────
-log "--- 4/6: building LichtFeld v0.5.2 from source"
-log "starting build in tmux session 'lfs_build' on instance — polling every 60s"
-_ssh "tmux new-session -d -s lfs_build \
-    'bash $WORKSPACE/run/bootstrap_instance.sh; tmux wait-for -S build_done'" || true
-# tmux may not have wait-for in older versions; just poll STATUS/BUILD
-poll_build
-log "build: done"
-
-# ── 5/6: Extract and prep frames ──────────────────────────────────────────────
-log "--- 5/6: extracting frames at 3fps (scale to 1920px)"
-_ssh "mkdir -p $WORKSPACE/frames_raw"
-_ssh "ffmpeg -y -i $WORKSPACE/robot_arm.mp4 \
+# ── 4/5: extract + prep frames ────────────────────────────────────────────────
+log "--- 4/5: extracting frames at 3fps (scale to 1920px)"
+_ssh "ffmpeg -y -loglevel warning -i $WORKSPACE/robot_arm.mp4 \
     -vf 'fps=3,scale=1920:-1' -q:v 2 \
     '$WORKSPACE/frames_raw/frame_%05d.jpg' \
     >> $WORKSPACE/logs/ffmpeg.log 2>&1"
 FRAME_COUNT=$( _ssh "ls $WORKSPACE/frames_raw/*.jpg | wc -l" )
 log "extracted: $FRAME_COUNT raw frames"
-
-# Wait for pip install if still running
-_ssh "pip3 show opencv-python-headless > /dev/null 2>&1 \
-    || pip3 install opencv-python-headless pillow numpy -q"
 
 log "filtering: threshold=$PREP_THRESHOLD → target=$PREP_TARGET frames"
 _ssh "python3 $WORKSPACE/prep_frames.py \
@@ -120,11 +89,11 @@ _ssh "python3 $WORKSPACE/prep_frames.py \
     --threshold $PREP_THRESHOLD --target $PREP_TARGET --no-sheet \
     > $WORKSPACE/logs/prep.log 2>&1"
 PREPPED_COUNT=$( _ssh "ls $WORKSPACE/prepped/frames/*.jpg 2>/dev/null | wc -l" )
-log "prepped: $PREPPED_COUNT frames → $WORKSPACE/prepped/frames"
+log "prepped: $PREPPED_COUNT frames"
 [[ "$PREPPED_COUNT" -gt 0 ]] || die "no prepped frames — check $WORKSPACE/logs/prep.log"
 
-# ── 6/6: Launch training (detached) ───────────────────────────────────────────
-log "--- 6/6: launching training in tmux 'lfs_train' (detached)"
+# ── 5/5: launch training in tmux on the instance ──────────────────────────────
+log "--- 5/5: launching training in tmux 'lfs_train' (detached)"
 _ssh "tmux new-session -d -s lfs_train \
     'env LFS_DATA_PATH=$WORKSPACE/prepped/frames \
          LFS_OUTPUT_PATH=$WORKSPACE/output \
@@ -132,7 +101,7 @@ _ssh "tmux new-session -d -s lfs_train \
          LFS_ITER=$LFS_ITER \
          LFS_MAX_WIDTH=$LFS_MAX_WIDTH \
          LFS_MAX_CAP=$LFS_MAX_CAP \
-     bash $WORKSPACE/scripts/run_train.sh'"
+     bash /opt/lichtfeld/scripts/run_train.sh'"
 sleep 3
 
 TRAIN_STATE=$( _ssh "grep '^STATE=' $WORKSPACE/output/STATUS.md 2>/dev/null | cut -d= -f2-" || echo "pending" )
@@ -141,10 +110,15 @@ log "train state: $TRAIN_STATE"
 log ""
 log "=== smoke test running ==="
 log ""
-log "poll:     bash run/status_direct.sh $VAST_HOST $VAST_PORT"
-log "logs:     ssh -p $VAST_PORT root@$VAST_HOST 'tail -f $WORKSPACE/output/train.log'"
-log "download: rsync -avz -e 'ssh -p $VAST_PORT' root@$VAST_HOST:$WORKSPACE/output/ ./output/"
-log "destroy:  python3 ~/projects/automation_server/scripts/vast_burst.py destroy <INSTANCE_ID> --yes"
+log "Recommended: start the monitor in its own tmux window/pane:"
+log "  tmux new-session -d -s lfs_monitor -- bash $REPO_ROOT/run/monitor.sh $VAST_HOST $VAST_PORT"
+log "  tail -f $REPO_ROOT/logs/monitor-$VAST_HOST.log"
 log ""
-log "Training target: $LFS_ITER iterations, ~30-60 min depending on GPU."
-log "Poll status_direct.sh every few minutes. When train=DONE, download output."
+log "Manual one-shot poll:"
+log "  bash $REPO_ROOT/run/status_direct.sh $VAST_HOST $VAST_PORT"
+log ""
+log "Download on completion:"
+log "  rsync -avz -e 'ssh -p $VAST_PORT' root@$VAST_HOST:$WORKSPACE/output/ ./output/"
+log ""
+log "Destroy when done:"
+log "  python3 $AUTOMATION_ROOT/scripts/vast_burst.py destroy <INSTANCE_ID> --yes"
