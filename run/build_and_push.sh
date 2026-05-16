@@ -13,10 +13,15 @@ set -euo pipefail
 
 TAG="${1:-v0.5.2}"
 
+# gh infers the target repo from cwd's git context. cd into the repo root so
+# the script works regardless of where the user runs it from.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
 command -v gh >/dev/null || { echo "gh CLI not installed" >&2; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "gh not authenticated — run 'gh auth login'" >&2; exit 1; }
 
-echo "triggering build-and-push workflow with tag=$TAG"
+echo "triggering build-and-push workflow with tag=$TAG (repo: $REPO_ROOT)"
 gh workflow run build-and-push.yml -f tag="$TAG"
 
 # Give the API a beat to register the new run, then follow the latest one
