@@ -24,8 +24,11 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 RUN git clone --quiet https://github.com/microsoft/vcpkg /vcpkg \
     && /vcpkg/bootstrap-vcpkg.sh -disableMetrics
 
-# LichtFeld source — pinned to release tag
+# LichtFeld source — pinned to release tag.
+# --recurse-submodules is required: external/libvterm is a git submodule
+# (terminal emulator used by the visualizer module, which is always built).
 RUN git clone --quiet --branch ${LFS_TAG} --depth 1 \
+    --recurse-submodules --shallow-submodules \
     https://github.com/MrNeRF/LichtFeld-Studio /src
 
 WORKDIR /src
@@ -35,7 +38,12 @@ WORKDIR /src
 # display-less container.
 #
 # MAKE_JOBS is overridable via build-arg; GHA passes 2 to fit in 16 GB RAM.
-RUN cmake -B build \
+#
+# BuildKit cache mount preserves vcpkg's binary cache across builds so we
+# don't re-build x264/libb2/usd/... from source on every retry (~80 min savings).
+# Requires cache-to: type=gha,mode=max in the GHA workflow (already set).
+RUN --mount=type=cache,target=/root/.cache/vcpkg/archives,id=vcpkg-binary-cache \
+    cmake -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DLFS_ENFORCE_LINUX_GUI_BACKENDS=OFF \
     -DCMAKE_TOOLCHAIN_FILE=/vcpkg/scripts/buildsystems/vcpkg.cmake \
