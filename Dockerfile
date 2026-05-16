@@ -13,7 +13,7 @@ ARG MAKE_JOBS=2
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
     gcc-14 g++-14 ninja-build git python3 python3-pip curl zip unzip pkg-config \
     libssl-dev ca-certificates \
-    nasm autoconf automake libtool bison flex gettext \
+    nasm yasm autoconf autoconf-archive automake libtool m4 bison flex gettext texinfo gperf \
     && pip3 install --no-cache-dir --break-system-packages -q cmake \
     && rm -rf /var/lib/apt/lists/* \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 14 \
