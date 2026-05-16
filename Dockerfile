@@ -31,6 +31,15 @@ RUN git clone --quiet --branch ${LFS_TAG} --depth 1 \
     --recurse-submodules --shallow-submodules \
     https://github.com/MrNeRF/LichtFeld-Studio /src
 
+# CUDA stub library so build-time Python imports succeed.
+# The devel image only ships /usr/local/cuda/lib64/stubs/libcuda.so (no .1
+# versioned alias). LichtFeld's post-build step runs nanobind stubgen which
+# imports the compiled lichtfeld.so — that triggers a real dlopen of
+# libcuda.so.1. The stub is enough for symbol resolution; runtime on a real
+# GPU host uses the driver-provided libcuda.so.1 via NVIDIA_VISIBLE_DEVICES.
+RUN ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64/stubs
+
 WORKDIR /src
 
 # -DLFS_ENFORCE_LINUX_GUI_BACKENDS=OFF is the critical headless flag.
